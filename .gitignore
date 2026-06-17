@@ -1,0 +1,9 @@
+# Release binaries live on GitHub Releases, not in the repo
+*.exe
+*.zip
+*.crx
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp

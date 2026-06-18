@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Origami Live — installed</title>
+<style>
+  /* Brand tokens mirror the Studio (packages/extension/static/studio.html). */
+  :root { --bg:#FAF7F2; --paper:#fff; --ink:#1A1A1A; --soft:#5A5752; --mute:#6E6A62; --rule:#E8E2D6; --accent:#557A4E; --accent-soft:#EAF0E7; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: "Segoe UI", Arial, sans-serif; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 56px 24px 72px; }
+
+  .brand { display: flex; align-items: center; gap: 4px; font-family: Georgia, serif; font-size: 22px; font-weight: 600; }
+  .brand .dot { color: var(--accent); }
+  .brand svg { width: 30px; height: 30px; color: var(--accent); margin-left: 6px; }
+
+  .pill { display: inline-flex; align-items: center; gap: 7px; margin: 22px 0 0; padding: 5px 13px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 700; }
+  .pill .tick { width: 16px; height: 16px; }
+
+  h1 { font-family: Georgia, serif; font-weight: 600; font-size: 38px; line-height: 1.1; margin: 16px 0 8px; }
+  .lede { font-size: 17px; color: var(--soft); margin: 0 0 8px; max-width: 56ch; }
+
+  h2 { font-family: Georgia, serif; font-weight: 600; font-size: 21px; margin: 46px 0 16px; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--paper); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 18px 16px; }
+  .card .ic { font-size: 20px; line-height: 1; }
+  .card h3 { font-size: 15px; font-weight: 700; margin: 12px 0 4px; }
+  .card p { font-size: 13.5px; color: var(--mute); margin: 0; }
+
+  ol.steps { counter-reset: s; list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  ol.steps li { counter-increment: s; position: relative; padding: 14px 16px 14px 52px; background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; font-size: 14.5px; }
+  ol.steps li::before { content: counter(s); position: absolute; left: 14px; top: 13px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; font: 700 13px/24px "Segoe UI", sans-serif; text-align: center; }
+  ol.steps b { color: var(--ink); }
+
+  ul.secure { list-style: none; padding: 0; margin: 0; display: grid; gap: 9px; }
+  ul.secure li { position: relative; padding-left: 26px; font-size: 14px; color: var(--soft); }
+  ul.secure li::before { content: "✓"; position: absolute; left: 0; top: 0; color: var(--accent); font-weight: 700; }
+
+  .callout { margin-top: 16px; background: #FFF8EC; border: 1px solid #F0DEBF; border-radius: 12px; padding: 18px 20px; }
+  .callout h3 { margin: 0 0 6px; font-size: 15px; font-weight: 700; color: #7A5212; }
+  .callout p { margin: 0 0 8px; font-size: 13.5px; color: #6b5224; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout b { color: #5e4418; }
+  a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  a:hover { text-decoration: underline; }
+
+  footer { margin-top: 52px; padding-top: 22px; border-top: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; font-size: 12.5px; color: var(--mute); }
+  footer .sep { color: var(--rule); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="brand">Origami<span class="dot">.</span>
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <g fill="currentColor">
+        <g opacity="0.45"><polygon points="30,40 47,40 52,11"/></g>
+        <polygon points="26,40 48,40 43,7" opacity="0.92"/>
+        <polygon points="44,40 62,29 47,48" opacity="0.72"/>
+        <polygon points="28,39 48,41 36,55"/>
+        <polygon points="21,44 28,39 36,55" opacity="0.7"/>
+        <polygon points="9,12 15,13 28,41 22,44" opacity="0.85"/>
+        <polygon points="9,12 15,13 14,19 2,17"/>
+      </g>
+    </svg>
+  </div>
+
+  <div class="pill">
+    <svg class="tick" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Origami Live is installed
+  </div>
+
+  <h1>Your deck is now a private web app.</h1>
+  <p class="lede">Origami Live runs a tiny web server on your own machine, just for you. Served that way, a single <code>.origami.html</code> file behaves like a real website — so the things a plain file can't do suddenly work.</p>
+
+  <h2>What you just unlocked</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="ic">▶</div>
+      <h3>Video &amp; dashboards play</h3>
+      <p>YouTube, Vimeo, Power BI and other embeds play inline instead of falling back to a link card.</p>
+    </div>
+    <div class="card">
+      <div class="ic">⤓</div>
+      <h3>Smooth, seekable video</h3>
+      <p>Big local videos stream and scrub cleanly — the file:// fumbling is gone.</p>
+    </div>
+    <div class="card">
+      <div class="ic">↻</div>
+      <h3>Live data, never stale</h3>
+      <p>Slides can fetch live numbers — a chart, a KPI, a status board that's current at present-time.</p>
+    </div>
+    <div class="card">
+      <div class="ic">✦</div>
+      <h3>Watch it build, live</h3>
+      <p>Connect an AI coding tool and watch slides appear in real time as the deck writes itself.</p>
+    </div>
+    <div class="card">
+      <div class="ic">⊞</div>
+      <h3>Share to the room</h3>
+      <p>A read-only QR — anyone on your Wi-Fi opens the deck on their own device. No app, no cloud.</p>
+    </div>
+  </div>
+
+  <h2>How to use it</h2>
+  <ol class="steps">
+    <li>Open your deck in the <b>Origami</b> Studio (the browser extension).</li>
+    <li>Click <b>Go Live</b> in the toolbar. Origami hands the deck to this helper.</li>
+    <li>A <b>localhost</b> tab opens — your deck, playing like a web page. Edit and save; the live tab follows along.</li>
+  </ol>
+
+  <h2>Private by design</h2>
+  <ul class="secure">
+    <li>It serves to <b>127.0.0.1</b> (your machine only) by default — <b>nothing is uploaded</b>, no account, no cloud.</li>
+    <li>The server is <b>read-only</b>: it hands out the page and nothing else. There is no way for a viewer to change your files.</li>
+    <li><b>Sharing to the room</b> is opt-in and key-gated — the link carries a one-time key, and viewers can only ever <b>view</b>, never edit. Windows asks once before it's reachable on your network.</li>
+    <li>It serves a <b>temporary copy</b> of the open deck — not your folders, not your other files.</li>
+    <li>It only runs while you're live. Close the tab or press <b>Stop</b> and the server is gone.</li>
+  </ul>
+
+  <div class="callout">
+    <h3>About the Windows warning</h3>
+    <p>Origami Live is <b>free</b>, and we don't pay for a code-signing certificate yet — so Windows may show a blue <b>"Windows protected your PC"</b> screen the first time you run it. That's the unsigned-app warning, not a virus alert.</p>
+    <p>Click <b>More info → Run anyway</b>. If you'd rather check first, learn how it works at <a href="https://origami.gratis/how.html">origami.gratis/how.html</a>.</p>
+  </div>
+
+  <footer>
+    <span>Origami Live v0.1.1</span>
+    <span class="sep">·</span>
+    <a href="https://origami.gratis/how.html">How it works</a>
+    <span class="sep">·</span>
+    <a href="https://origami.gratis">origami.gratis</a>
+    <span class="sep">·</span>
+    <span>Works offline · nothing is uploaded</span>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -13,7 +13,7 @@ One self-contained `.origami.html` file — a deck, a report, a dashboard — th
 ![One file](https://img.shields.io/badge/one-.origami.html-1a1a1a?style=flat-square)
 ![Add-on](https://img.shields.io/badge/Chrome-add--on-557A4E?style=flat-square)
 
-[**Website**](https://origami.gratis) · [**Download OrigamiLive**](https://github.com/Passingbyposts/Origami-Folio/releases/latest) · [**Get the add-on**](#install)
+[**Website**](https://origami.gratis) · [**Download OrigamiLive**](https://github.com/PassingByPixels/Origami-Folio/releases/latest) · [**Get the add-on**](#install)
 
 </div>
 
@@ -53,7 +53,7 @@ The full authoring surface: insert palette, themes, the AI fold-editor and expor
 
 **3. OrigamiLive — to go live.** *(this repo's Releases)*
 A small local companion that adds **Go Live** (serve a deck over a local link) and **QR present** (drive the deck from your phone).
-→ [**Download the latest release**](https://github.com/Passingbyposts/Origami-Folio/releases/latest), run it, done.
+→ [**Download the latest release**](https://github.com/PassingByPixels/Origami-Folio/releases/latest), run it, done.
 
 ## Quickstart
 
@@ -75,7 +75,7 @@ Origami is offline-first. No account, no telemetry, no analytics. An `.origami.h
 
 ## FAQ
 
-**Is it open source?** No. Origami is proprietary — see [LICENSE](LICENSE). The `.origami.html` files *you* create are entirely yours.
+**Can I reuse or republish the code?** No — Origami is proprietary; see [LICENSE](LICENSE). The `.origami.html` files *you* create are entirely yours.
 
 **Does it phone home?** No.
 

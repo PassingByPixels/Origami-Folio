@@ -21,11 +21,14 @@ import { tmpdir, homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import type { Server } from 'node:http';
-import { serveHttp, type HttpServeHandle } from 'origami-mcp';
+import { serveHttp, type HttpServeHandle, type AuthorBridge } from 'origami-mcp';
 import { createDeckServer, listenLoopback, listenLan, lanAddress } from './server.js';
 import { WELCOME_HTML } from './welcome-html.js';
 
-export const HOST_VERSION = '0.1.2';
+export const HOST_VERSION = '0.1.3';
+
+/** How long open_deck waits for the user to approve in the browser before giving up (deny). */
+const CONFIRM_TIMEOUT_MS = 120_000;
 
 interface LiveState {
   server: Server;
@@ -130,16 +133,77 @@ export function createAuthorSession(
   const port = opts.port ?? 8765;
   let state: ArmState | null = null;
   let debounce: NodeJS.Timeout | undefined;
+  // open_deck consent round-trips: requestId → the resolver waiting on the browser's answer.
+  const pendingConfirms = new Map<string, (approved: boolean) => void>();
+  // per-approved-file watchers, so a save_deck to a real file re-pushes it to the relay tab.
+  const openWatchers = new Map<string, FSWatcher>();
+  // per-file debounce timers (a single shared timer would let one file's save cancel another's push).
+  const openDebounce = new Map<string, NodeJS.Timeout>();
 
-  async function pushDeck(file: string): Promise<void> {
+  /** Read a deck file and push its bytes to the relay tab (host → extension over the native port). */
+  async function pushFile(absFile: string): Promise<void> {
     if (!state) return;
     try {
-      const html = await readFile(path.join(state.dir, file), 'utf8');
-      push({ type: 'relay-update', name: file, html });
+      const html = await readFile(absFile, 'utf8');
+      push({ type: 'relay-update', name: path.basename(absFile), html });
     } catch {
       /* file mid-write (atomic rename in flight) — the next watch event re-reads */
     }
   }
+  const pushDeck = (file: string): Promise<void> =>
+    state ? pushFile(path.join(state.dir, file)) : Promise.resolve();
+
+  /** The host hook open_deck uses: ask the browser to approve a real file, then mirror it live.
+      requestOpen is the consent gate; onOpened starts the watch-and-push once approved. */
+  const bridge: AuthorBridge = {
+    requestOpen(absPath: string): Promise<boolean> {
+      // one consent prompt at a time — the relay tab shows a single banner, so a second
+      // concurrent open_deck would clobber the first. Reject it clearly instead of hanging.
+      if (pendingConfirms.size > 0) {
+        return Promise.reject(
+          new Error('another deck is awaiting your approval in the browser — answer that prompt first, then retry')
+        );
+      }
+      return new Promise<boolean>((resolve) => {
+        const requestId = randomBytes(8).toString('hex');
+        let settled = false;
+        const finish = (approved: boolean): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          pendingConfirms.delete(requestId);
+          resolve(approved);
+        };
+        const timer = setTimeout(() => finish(false), CONFIRM_TIMEOUT_MS); // no answer → deny (safe-fail)
+        pendingConfirms.set(requestId, finish);
+        push({ type: 'relay-confirm', kind: 'open', path: absPath, requestId });
+      });
+    },
+    onOpened(absPath: string): void {
+      // show it in the relay tab right away, then watch its dir (filtered to this file's name)
+      // so each save_deck write re-pushes — the same live path create_deck rides.
+      void pushFile(absPath);
+      if (openWatchers.has(absPath)) return;
+      try {
+        const dir = path.dirname(absPath);
+        const base = path.basename(absPath);
+        const w = watch(dir, { persistent: false }, (_event, fname) => {
+          if (fname && path.basename(String(fname)) !== base) return; // ignore sibling files
+          clearTimeout(openDebounce.get(absPath)); // per-file timer: one file's save never cancels another's
+          openDebounce.set(
+            absPath,
+            setTimeout(() => {
+              openDebounce.delete(absPath);
+              void pushFile(absPath);
+            }, 120) // absorb the atomic-rename burst
+          );
+        });
+        openWatchers.set(absPath, w);
+      } catch {
+        /* fs.watch unsupported here — still editable, just no live re-push on save */
+      }
+    },
+  };
 
   return {
     get armed(): boolean {
@@ -151,7 +215,7 @@ export function createAuthorSession(
     async arm(): Promise<{ url: string; token: string; dir: string }> {
       if (state) return { url: state.http.url, token: state.http.token, dir: state.dir };
       const dir = await mkdtemp(path.join(tmpdir(), 'origami-author-'));
-      const http = await serveHttp([dir], { port });
+      const http = await serveHttp([dir], { port }, bridge);
       state = { dir, http };
       await mkdir(path.dirname(configPath), { recursive: true });
       await writeFile(
@@ -171,11 +235,21 @@ export function createAuthorSession(
       }
       return { url: http.url, token: http.token, dir };
     },
+    /** Route the browser's answer to an open_deck consent prompt back to the waiting tool. */
+    resolveConfirm(requestId: string, approved: boolean): void {
+      pendingConfirms.get(requestId)?.(approved);
+    },
     async disarm(): Promise<void> {
       if (!state) return;
       const s = state;
       state = null;
       clearTimeout(debounce);
+      for (const t of openDebounce.values()) clearTimeout(t);
+      openDebounce.clear();
+      for (const w of openWatchers.values()) w.close();
+      openWatchers.clear();
+      for (const finish of pendingConfirms.values()) finish(false); // any pending open → deny
+      pendingConfirms.clear();
       s.watcher?.close();
       await s.http.close();
       await rm(configPath, { force: true }).catch(() => {});
@@ -183,7 +257,7 @@ export function createAuthorSession(
   };
 }
 
-type Msg = { cmd?: string; name?: string; html?: string };
+type Msg = { cmd?: string; name?: string; html?: string; requestId?: string; approved?: boolean };
 
 export async function handleMessage(
   session: ReturnType<typeof createLiveSession>,
@@ -232,12 +306,16 @@ function runHost(): void {
   async function dispatch(msg: Msg): Promise<Record<string, unknown>> {
     switch (msg.cmd) {
       case 'arm':
-        return { ok: true, ...(await author.arm()) };
+        // include the helper version so the extension can nudge an old (e.g. 0.1.2, no open_deck) helper to update
+        return { ok: true, version: HOST_VERSION, ...(await author.arm()) };
       case 'disarm':
         await author.disarm();
         return { ok: true };
       case 'arm-status':
         return { ok: true, armed: author.armed, ...(author.info() ?? {}) };
+      case 'relay-confirm-reply':
+        author.resolveConfirm(String(msg.requestId ?? ''), msg.approved === true);
+        return { ok: true };
       default:
         return handleMessage(session, msg);
     }

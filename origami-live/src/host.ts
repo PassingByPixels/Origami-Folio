@@ -14,17 +14,18 @@
      -> { cmd: 'update', html }         <- { ok }        (rebuild the live page)
      -> { cmd: 'stop' }                 <- { ok }
 */
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { mkdtemp, writeFile, rm, mkdir, readFile } from 'node:fs/promises';
+import { writeFileSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import type { Server } from 'node:http';
+import { serveHttp, type HttpServeHandle } from 'origami-mcp';
 import { createDeckServer, listenLoopback, listenLan, lanAddress } from './server.js';
 import { WELCOME_HTML } from './welcome-html.js';
 
-export const HOST_VERSION = '0.1.0';
+export const HOST_VERSION = '0.1.2';
 
 interface LiveState {
   server: Server;
@@ -96,6 +97,92 @@ export function createLiveSession() {
   };
 }
 
+/* ---------- the armed authoring session (the MCP "port") ----------
+   When the browser addon ARMS, the host opens a loopback MCP /mcp port over a
+   working dir it owns (serveHttp from @origami/mcp), writes the url+token to
+   ~/.origami/live.json for the agent to read, and watches the dir. Whenever the
+   agent's create_deck / save_deck writes a deck there, the host pushes the bytes
+   to the armed extension over the native port (relay-update) — the Studio adopts
+   them live. The agent never touches the browser; arming is the consent. */
+
+/** The discovery file the external agent reads for the loopback URL + token. */
+function liveConfigPath(): string {
+  return path.join(homedir(), '.origami', 'live.json');
+}
+
+interface ArmState {
+  http: HttpServeHandle;
+  dir: string;
+  watcher?: FSWatcher;
+}
+
+/** Manages the armed MCP port + the working-dir watch → relay-update push. `push`
+    frames a message onto the native port (host → extension). Separate from the
+    Go-Live session so arming and Go-Live are independent. `opts` are injectable for
+    tests (real arming uses the defaults: the fixed port + ~/.origami/live.json). */
+export function createAuthorSession(
+  push: (msg: unknown) => void,
+  opts: { configPath?: string; port?: number } = {}
+) {
+  const configPath = opts.configPath ?? liveConfigPath();
+  // fixed loopback port so a static MCP client config (a URL in a config file) keeps
+  // working across arms; the token rotates each arm and rides into live.json.
+  const port = opts.port ?? 8765;
+  let state: ArmState | null = null;
+  let debounce: NodeJS.Timeout | undefined;
+
+  async function pushDeck(file: string): Promise<void> {
+    if (!state) return;
+    try {
+      const html = await readFile(path.join(state.dir, file), 'utf8');
+      push({ type: 'relay-update', name: file, html });
+    } catch {
+      /* file mid-write (atomic rename in flight) — the next watch event re-reads */
+    }
+  }
+
+  return {
+    get armed(): boolean {
+      return state !== null;
+    },
+    info(): { url: string; token: string; dir: string } | null {
+      return state ? { url: state.http.url, token: state.http.token, dir: state.dir } : null;
+    },
+    async arm(): Promise<{ url: string; token: string; dir: string }> {
+      if (state) return { url: state.http.url, token: state.http.token, dir: state.dir };
+      const dir = await mkdtemp(path.join(tmpdir(), 'origami-author-'));
+      const http = await serveHttp([dir], { port });
+      state = { dir, http };
+      await mkdir(path.dirname(configPath), { recursive: true });
+      await writeFile(
+        configPath,
+        JSON.stringify({ url: http.url, token: http.token, workingDir: dir, pid: process.pid }, null, 2),
+        'utf8'
+      );
+      try {
+        state.watcher = watch(dir, { persistent: false }, (_event, fname) => {
+          const name = fname ? String(fname) : '';
+          if (!/\.origami\.html$/i.test(name)) return;
+          clearTimeout(debounce);
+          debounce = setTimeout(() => void pushDeck(name), 120); // absorb the atomic-rename burst
+        });
+      } catch {
+        /* fs.watch unsupported here — the agent still authors; just no live push */
+      }
+      return { url: http.url, token: http.token, dir };
+    },
+    async disarm(): Promise<void> {
+      if (!state) return;
+      const s = state;
+      state = null;
+      clearTimeout(debounce);
+      s.watcher?.close();
+      await s.http.close();
+      await rm(configPath, { force: true }).catch(() => {});
+    },
+  };
+}
+
 type Msg = { cmd?: string; name?: string; html?: string };
 
 export async function handleMessage(
@@ -137,8 +224,24 @@ function writeMessage(msg: unknown): void {
 
 function runHost(): void {
   const session = createLiveSession();
+  const author = createAuthorSession(writeMessage);
   let acc = Buffer.alloc(0);
   let draining = false;
+
+  /** arm/disarm/arm-status drive the authoring port; everything else is Go-Live. */
+  async function dispatch(msg: Msg): Promise<Record<string, unknown>> {
+    switch (msg.cmd) {
+      case 'arm':
+        return { ok: true, ...(await author.arm()) };
+      case 'disarm':
+        await author.disarm();
+        return { ok: true };
+      case 'arm-status':
+        return { ok: true, armed: author.armed, ...(author.info() ?? {}) };
+      default:
+        return handleMessage(session, msg);
+    }
+  }
 
   const drain = async (): Promise<void> => {
     if (draining) return;
@@ -151,7 +254,7 @@ function runHost(): void {
         acc = acc.subarray(4 + len);
         let reply: Record<string, unknown>;
         try {
-          reply = await handleMessage(session, JSON.parse(json));
+          reply = await dispatch(JSON.parse(json));
         } catch (e) {
           reply = { ok: false, error: (e as Error).message };
         }
@@ -166,8 +269,8 @@ function runHost(): void {
     acc = Buffer.concat([acc, chunk]);
     void drain();
   });
-  // Chrome closed the port (tab/extension gone): tear the server down and exit.
-  process.stdin.on('end', () => void session.stop().then(() => process.exit(0)));
+  // Chrome closed the port (tab/extension gone): disarm + tear the server down and exit.
+  process.stdin.on('end', () => void Promise.all([author.disarm(), session.stop()]).then(() => process.exit(0)));
 }
 
 /* ---------- self-install (the packaged exe is its own installer) ----------

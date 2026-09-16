@@ -25,7 +25,7 @@ import { serveHttp, type HttpServeHandle, type AuthorBridge } from 'origami-mcp'
 import { createDeckServer, listenLoopback, listenLan, lanAddress } from './server.js';
 import { WELCOME_HTML } from './welcome-html.js';
 
-export const HOST_VERSION = '0.1.3';
+export const HOST_VERSION = '0.1.5';
 
 /** How long open_deck waits for the user to approve in the browser before giving up (deny). */
 const CONFIRM_TIMEOUT_MS = 120_000;
@@ -358,22 +358,45 @@ function runHost(): void {
    host. One file, one double-click — no npm/PowerShell/Node needed by the user. */
 
 const HOST_NAME = 'com.origami.live';
-// The extension this host accepts messages from. PINNED via the manifest `key`
-// (packages/extension/static/manifest.json), so the unpacked dev id is stable. The
-// Chrome Web Store assigns its OWN id at first publish, so this is OVERRIDABLE without
-// rebuilding/re-signing the exe: set ORIGAMI_EXTENSION_ID, or drop the published id in
-// `extension-id.txt` next to the exe, then re-run it to re-register.
-const DEFAULT_EXTENSION_ID = 'oghflmdefaljpkmdeeijbjbhofadhkli';
-function resolveExtensionId(exeDir: string): string {
-  const env = process.env.ORIGAMI_EXTENSION_ID?.trim();
-  if (env) return env;
+/* THE EXTENSIONS THIS HOST ACCEPTS MESSAGES FROM — BOTH OF THEM, BY DEFAULT.
+   There are two legitimate ids for the same add-on. The unpacked dev build's is PINNED by the
+   manifest `key` (packages/extension/static/manifest.json), so it is stable; the Chrome Web Store
+   assigns its OWN at first publish, because the packaged zip deliberately strips that key.
+   Registering only the dev id — which is what shipped through v0.1.4 — meant Chrome refused the
+   native-messaging connect for every WEB STORE install: the caller's origin simply was not on the
+   list, so "Go Live" failed for everyone who did not build the add-on themselves. The override
+   below existed, but a user has no way to know they need it. So both ship.
+   Still overridable for a custom build: set ORIGAMI_EXTENSION_ID, or drop ids in
+   `extension-id.txt` next to the exe (comma- or whitespace-separated), then re-run it to
+   re-register. An override REPLACES this pair rather than adding to it. */
+const STORE_EXTENSION_ID = 'flhbdfakcooaomfaehhgenmmnlglhehk';
+const DEV_EXTENSION_ID = 'oghflmdefaljpkmdeeijbjbhofadhkli';
+const DEFAULT_EXTENSION_IDS = [STORE_EXTENSION_ID, DEV_EXTENSION_ID];
+
+const parseIds = (raw: string): string[] => raw.split(/[,\s]+/).filter((id) => id.length > 0);
+
+export function resolveExtensionIds(exeDir: string, env = process.env.ORIGAMI_EXTENSION_ID): string[] {
+  const fromEnv = parseIds(env ?? '');
+  if (fromEnv.length) return fromEnv;
   try {
-    const sidecar = readFileSync(path.join(exeDir, 'extension-id.txt'), 'utf8').trim();
-    if (sidecar) return sidecar;
+    const fromSidecar = parseIds(readFileSync(path.join(exeDir, 'extension-id.txt'), 'utf8'));
+    if (fromSidecar.length) return fromSidecar;
   } catch {
-    /* no sidecar — use the pinned default */
+    /* no sidecar — ship the pinned pair */
   }
-  return DEFAULT_EXTENSION_ID;
+  return DEFAULT_EXTENSION_IDS;
+}
+
+/** The native-messaging manifest Chrome reads, as an object — separated from the write so the
+    allow-list can be asserted without touching the disk or the registry. */
+export function nativeManifest(exe: string, ids: string[]): Record<string, unknown> {
+  return {
+    name: HOST_NAME,
+    description: 'Origami Live - serves the current deck on localhost so it plays like a real web page',
+    path: exe,
+    type: 'stdio',
+    allowed_origins: ids.map((id) => `chrome-extension://${id}/`),
+  };
 }
 const REG_BASES = [
   'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts',
@@ -385,22 +408,8 @@ const REG_BASES = [
 function selfInstall(): void {
   const exe = process.execPath; // the OrigamiLive.exe the user double-clicked
   const manifestPath = path.join(path.dirname(exe), `${HOST_NAME}.json`);
-  const extensionId = resolveExtensionId(path.dirname(exe));
-  writeFileSync(
-    manifestPath,
-    JSON.stringify(
-      {
-        name: HOST_NAME,
-        description: 'Origami Live - serves the current deck on localhost so it plays like a real web page',
-        path: exe,
-        type: 'stdio',
-        allowed_origins: [`chrome-extension://${extensionId}/`],
-      },
-      null,
-      2
-    ),
-    'utf8'
-  );
+  const ids = resolveExtensionIds(path.dirname(exe));
+  writeFileSync(manifestPath, JSON.stringify(nativeManifest(exe, ids), null, 2), 'utf8');
   for (const base of REG_BASES) {
     try {
       execFileSync('reg', ['add', `${base}\\${HOST_NAME}`, '/ve', '/t', 'REG_SZ', '/d', manifestPath, '/f'], {

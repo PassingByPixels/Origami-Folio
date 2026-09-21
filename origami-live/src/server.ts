@@ -25,6 +25,7 @@ const TYPES: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  '.avif': 'image/avif',
   // local video the deck references by relative path (the video block's local source)
   '.mp4': 'video/mp4',
   '.m4v': 'video/mp4',
@@ -33,11 +34,39 @@ const TYPES: Record<string, string> = {
   '.mov': 'video/quicktime',
 };
 
+/* The ONLY sibling files served from the deck's real folder in indexHtml mode. The
+   Go Live port is opened in a BROWSER, so it cannot have the MCP port's Origin guard —
+   any local process can request from it. Serving the whole folder would let that
+   process read every file beside the deck, so non-index requests are limited to media
+   the deck may reference. This stops reading arbitrary documents, keys or configs from
+   the folder. It does NOT hide the media itself (a local process can still fetch the
+   deck and its media), and containment is path-based, not realpath-based, so a media
+   symlink pointing outside the folder is still followed. */
+const MEDIA_EXT = new Set([
+  '.mp4',
+  '.m4v',
+  '.webm',
+  '.ogv',
+  '.mov',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.avif',
+  '.svg',
+]);
+
 export interface ServeOptions {
   /** Absolute folder to serve. */
   root: string;
   /** Deck file (relative to root) that "/" redirects to; omitted = a listing. */
   indexFile?: string;
+  /** The deck's bytes, served in place of reading indexFile from root. Set when root is the
+      deck's REAL folder (Go Live), so the live/edited HTML serves without writing to disk.
+      A getter keeps serving the latest in-memory bytes after an update. When set, non-index
+      requests are restricted to MEDIA_EXT. */
+  indexHtml?: string | (() => string);
   /** Push file-changes to the served page over SSE (the "watch it build" channel). */
   live?: boolean;
   /** Network-share gate: when set, every request must carry this as its first path
@@ -92,7 +121,14 @@ function resolveUnderRoot(root: string, urlPath: string): string | null {
   return target;
 }
 
-export function createDeckServer(opts: ServeOptions): Server {
+/** A deck server, plus the live-reload trigger the host needs when the deck bytes
+    come from memory (indexHtml) rather than a watched file. */
+export interface DeckServer extends Server {
+  /** Push a reload to connected live clients. A no-op unless built with live: true. */
+  reload(): void;
+}
+
+export function createDeckServer(opts: ServeOptions): DeckServer {
   const root = path.resolve(opts.root);
   const clients = new Set<ServerResponse>();
 
@@ -148,7 +184,16 @@ export function createDeckServer(opts: ServeOptions): Server {
           res.writeHead(404).end('not found');
           return;
         }
+        // The index file IS the deck. In indexHtml mode its bytes come from memory
+        // (the live/edited deck), never from the user's disk — so unsaved edits serve
+        // and the on-disk deck is never rewritten.
+        const isIndex = !!opts.indexFile && target === path.resolve(root, opts.indexFile);
         if (info.isDirectory()) {
+          // A bare folder is listed for convenience; with an indexFile a directory is not served.
+          if (opts.indexFile) {
+            res.writeHead(404).end('not found');
+            return;
+          }
           const names = (await readdir(target)).filter((n) => /\.origami\.html$|\.html$/i.test(n));
           const links = names.map((n) => `<li><a href="${prefix}/${encodeURIComponent(n)}">${n}</a></li>`).join('');
           res
@@ -156,7 +201,25 @@ export function createDeckServer(opts: ServeOptions): Server {
             .end(`<!doctype html><meta charset=utf-8><title>Origami decks</title><h1>Decks</h1><ul>${links}</ul>`);
           return;
         }
+        if (isIndex && opts.indexHtml !== undefined) {
+          const htmlType = TYPES['.html'];
+          if (req.method === 'HEAD') {
+            res.writeHead(200, { 'content-type': htmlType, 'cache-control': 'no-store' }).end();
+            return;
+          }
+          const indexHtml = typeof opts.indexHtml === 'function' ? opts.indexHtml() : opts.indexHtml;
+          const body = Buffer.from(opts.live ? injectLive(indexHtml, prefix) : indexHtml, 'utf8');
+          res.writeHead(200, { 'content-type': htmlType, 'content-length': body.length, 'cache-control': 'no-store' });
+          res.end(body);
+          return;
+        }
         const ext = path.extname(target).toLowerCase();
+        // indexHtml mode = serving the deck's real folder: non-index requests are limited to
+        // media. 404 (not 403) so the server never confirms what else the folder holds.
+        if (opts.indexHtml !== undefined && !isIndex && !MEDIA_EXT.has(ext)) {
+          res.writeHead(404).end('not found');
+          return;
+        }
         const type = TYPES[ext] ?? 'application/octet-stream';
 
         // Live mode augments the served HTML with the loader (disk file untouched);
@@ -216,7 +279,8 @@ export function createDeckServer(opts: ServeOptions): Server {
         res.end('server error');
       }
     })();
-  });
+  }) as DeckServer;
+  server.reload = () => {}; // real when live; the host calls it when the deck bytes change in memory
 
   if (opts.live) {
     const broadcast = (): void => {
@@ -224,6 +288,7 @@ export function createDeckServer(opts: ServeOptions): Server {
       // (onmessage ignores named events — those need addEventListener)
       for (const res of clients) res.write('data: changed\n\n');
     };
+    server.reload = broadcast; // indexHtml mode has no watched file, so the host drives the reload
     let debounce: NodeJS.Timeout | undefined;
     let watcher: FSWatcher | undefined;
     try {

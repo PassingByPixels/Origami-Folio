@@ -14,7 +14,7 @@
      -> { cmd: 'update', html }         <- { ok }        (rebuild the live page)
      -> { cmd: 'stop' }                 <- { ok }
 */
-import { mkdtemp, writeFile, rm, mkdir, readFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, mkdir, readFile, stat } from 'node:fs/promises';
 import { writeFileSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir, homedir } from 'node:os';
@@ -22,25 +22,31 @@ import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import type { Server } from 'node:http';
 import { serveHttp, type HttpServeHandle, type AuthorBridge } from 'origami-mcp';
-import { createDeckServer, listenLoopback, listenLan, lanAddress } from './server.js';
+import { createDeckServer, listenLoopback, listenLan, lanAddress, type DeckServer } from './server.js';
 import { WELCOME_HTML } from './welcome-html.js';
 
 /* 0.2.0 ships the tokenless MCP port (Origin/Host guard instead of a bearer token), so the
    arm reply and live.json no longer carry a token. An older helper still REQUIRES a token and
    would fail with the new extension, which is why the extension's REQUIRED_HELPER moves to
    0.2.0 with it. The arm flow itself is otherwise unchanged (temp working dir, live.json,
-   loopback 8765). */
-export const HOST_VERSION = '0.2.1';
+   loopback 8765). 0.2.2 adds Go Live serving the deck's REAL folder (a local video beside
+   the deck then resolves over http), so the extension's REQUIRED_HELPER moves to 0.2.2. */
+export const HOST_VERSION = '0.2.2';
 
 /** How long open_deck waits for the user to approve in the browser before giving up (deny). */
 const CONFIRM_TIMEOUT_MS = 120_000;
 
 interface LiveState {
-  server: Server;
-  dir: string;
+  server: DeckServer;
+  /** The folder the loopback server serves: the deck's real folder, or a temp dir. */
+  rootDir: string;
+  /** The temp dir this session owns and must delete on stop; null when serving the user's folder. */
+  ownedDir: string | null;
   url: string;
   deckName: string;
-  lan?: { server: Server; url: string; token: string };
+  /** The live deck bytes. Served as the index; never written into the user's folder. */
+  indexHtml: string;
+  lan?: { server: Server; url: string; token: string; dir: string };
 }
 
 /** Keep the served file name deck-like and path-safe (it's attacker-influenced text). */
@@ -49,58 +55,101 @@ function safeName(name: string): string {
   return /\.html?$/i.test(base) ? base : base + '.origami.html';
 }
 
-/** The live session: one temp dir + one --live server, reused across updates. */
+/** The live session: one server over the deck's real folder (or a temp dir), reused across updates. */
 export function createLiveSession() {
   let state: LiveState | null = null;
+
+  /** True when `dir` exists and is a directory. */
+  async function isDir(dir: string): Promise<boolean> {
+    try {
+      return (await stat(dir)).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  /** Update the served deck. Temp mode rewrites the temp file (its watcher reloads the page);
+      real-folder mode keeps the bytes in memory and pushes the reload directly. Either way the
+      user's folder is never written to. */
+  async function applyUpdate(html: string): Promise<void> {
+    if (!state) return;
+    state.indexHtml = html;
+    if (state.ownedDir) await writeFile(path.join(state.rootDir, state.deckName), html, 'utf8');
+    else state.server.reload();
+    if (state.lan) await writeFile(path.join(state.lan.dir, state.deckName), html, 'utf8');
+  }
 
   return {
     get url() {
       return state?.url ?? null;
     },
-    async serve(name: string, html: string): Promise<string> {
-      if (!state) {
-        const dir = await mkdtemp(path.join(tmpdir(), 'origami-live-'));
-        const deckName = safeName(name);
-        await writeFile(path.join(dir, deckName), html, 'utf8');
-        const server = createDeckServer({ root: dir, indexFile: deckName, live: true });
-        const port = await listenLoopback(server, 8787);
-        state = { server, dir, url: `http://127.0.0.1:${port}/`, deckName };
-      } else {
-        await writeFile(path.join(state.dir, state.deckName), html, 'utf8');
+    /** Serve the deck. With a known real `dir`, the server's root IS that folder so a sibling
+        media file resolves by relative path; the deck's own bytes still come from `html`. Without
+        a `dir` (unsaved/relay deck) the deck is written to a temp dir, as before. */
+    async serve(name: string, html: string, dir?: string): Promise<string> {
+      if (state) {
+        await applyUpdate(html);
+        return state.url;
       }
+      const deckName = safeName(name);
+      const realDir = dir && (await isDir(dir)) ? dir : null;
+      let rootDir: string;
+      let ownedDir: string | null = null;
+      if (realDir) {
+        rootDir = realDir;
+      } else {
+        rootDir = await mkdtemp(path.join(tmpdir(), 'origami-live-'));
+        ownedDir = rootDir;
+        await writeFile(path.join(rootDir, deckName), html, 'utf8');
+      }
+      const server = createDeckServer({
+        root: rootDir,
+        indexFile: deckName,
+        // real folder: serve the in-memory deck (a getter, so `update` takes effect); temp: read the file
+        indexHtml: realDir ? () => state!.indexHtml : undefined,
+        live: true,
+      });
+      // assign state before listening: the getter above reads it on every request
+      state = { server, rootDir, ownedDir, url: '', deckName, indexHtml: html };
+      const port = await listenLoopback(server, 8787);
+      state.url = `http://127.0.0.1:${port}/`;
       return state.url;
     },
-    async update(html: string): Promise<void> {
-      if (state) await writeFile(path.join(state.dir, state.deckName), html, 'utf8');
-    },
-    /** Also serve the SAME temp deck on the LAN, gated by a random token (a second
-        server, so "stop sharing" leaves the loopback session running). View-only by
-        construction: the only write path is `update` over stdio, never HTTP. */
+    update: applyUpdate,
+    /** Also serve the deck on the LAN. The LAN server gets its OWN temp dir holding only the
+        deck — the deck's real folder must never be exposed to the network. Token-gated, and
+        view-only: the only write path is `update` over stdio, never HTTP. */
     async shareLan(): Promise<{ url: string; token: string } | null> {
       if (!state) return null; // nothing live to share yet
       if (state.lan) return { url: state.lan.url, token: state.lan.token }; // idempotent
       const addr = lanAddress();
       if (!addr) return null; // no non-loopback network found
       const token = randomBytes(16).toString('base64url');
-      const server = createDeckServer({ root: state.dir, indexFile: state.deckName, live: true, token });
+      const dir = await mkdtemp(path.join(tmpdir(), 'origami-lan-'));
+      await writeFile(path.join(dir, state.deckName), state.indexHtml, 'utf8');
+      const server = createDeckServer({ root: dir, indexFile: state.deckName, live: true, token });
       const port = await listenLan(server, 8788);
       const url = `http://${addr}:${port}/${token}/`;
-      state.lan = { server, url, token };
+      state.lan = { server, url, token, dir };
       return { url, token };
     },
     async stopLan(): Promise<void> {
       if (!state?.lan) return;
-      const { server } = state.lan;
+      const { server, dir } = state.lan;
       state.lan = undefined;
       await new Promise<void>((r) => server.close(() => r()));
+      await rm(dir, { recursive: true, force: true });
     },
     async stop(): Promise<void> {
       if (!state) return;
-      const { server, dir, lan } = state;
+      const { server, ownedDir, lan } = state;
       state = null;
-      if (lan) await new Promise<void>((r) => lan.server.close(() => r()));
+      if (lan) {
+        await new Promise<void>((r) => lan.server.close(() => r()));
+        await rm(lan.dir, { recursive: true, force: true });
+      }
       await new Promise<void>((r) => server.close(() => r()));
-      await rm(dir, { recursive: true, force: true });
+      if (ownedDir) await rm(ownedDir, { recursive: true, force: true }); // only a temp dir we made
     },
   };
 }
@@ -262,7 +311,7 @@ export function createAuthorSession(
   };
 }
 
-type Msg = { cmd?: string; name?: string; html?: string; requestId?: string; approved?: boolean };
+type Msg = { cmd?: string; name?: string; html?: string; dir?: string; requestId?: string; approved?: boolean };
 
 export async function handleMessage(
   session: ReturnType<typeof createLiveSession>,
@@ -272,7 +321,7 @@ export async function handleMessage(
     case 'ping':
       return { ok: true, version: HOST_VERSION };
     case 'serve':
-      return { ok: true, url: await session.serve(msg.name ?? 'deck.origami.html', msg.html ?? '') };
+      return { ok: true, url: await session.serve(msg.name ?? 'deck.origami.html', msg.html ?? '', msg.dir) };
     case 'update':
       await session.update(msg.html ?? '');
       return { ok: true };

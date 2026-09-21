@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
+import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLiveSession, handleMessage } from '../src/host.js';
@@ -54,7 +56,10 @@ describe('Origami Live host — session', () => {
     'shareLan opens a token-gated LAN server; stopLan closes only it',
     async () => {
       session = createLiveSession();
-      await handleMessage(session, { cmd: 'serve', name: 'demo.origami.html', html: DECK });
+      // a real folder with a media sibling: the loopback server serves it, the LAN must not.
+      const lanDir = await mkdtemp(path.join(tmpdir(), 'origami-hostlan-'));
+      await writeFile(path.join(lanDir, 'clip.mp4'), Buffer.from('0123456789'));
+      await handleMessage(session, { cmd: 'serve', name: 'demo.origami.html', html: DECK, dir: lanDir });
       const r = (await handleMessage(session, { cmd: 'shareLan' })) as {
         ok: boolean;
         lanUrl?: string;
@@ -63,6 +68,7 @@ describe('Origami Live host — session', () => {
       };
       if (!r.ok) {
         expect(r.error).toBeTruthy(); // no non-loopback interface here — the honest no-op path
+        await rm(lanDir, { recursive: true, force: true });
         return;
       }
       expect(r.lanUrl).toMatch(/^http:\/\/\d+\.\d+\.\d+\.\d+:\d+\/[A-Za-z0-9_-]+\/$/);
@@ -71,6 +77,7 @@ describe('Origami Live host — session', () => {
       // fetch via the LAN IP (not 127.0.0.1): on Windows a loopback-only squatter on
       // the same port can shadow our 0.0.0.0 server on the loopback path.
       expect((await fetch(`${base}/demo.origami.html`)).status).toBe(200);
+      expect((await fetch(`${base}/clip.mp4`)).status).toBe(404); // the folder is never exposed to the LAN
       expect((await fetch(`${origin}/demo.origami.html`)).status).toBe(404); // black hole without the token
       expect((await fetch(`${base}/demo.origami.html`, { method: 'POST' })).status).toBe(405); // view-only
 
@@ -80,8 +87,69 @@ describe('Origami Live host — session', () => {
       await handleMessage(session, { cmd: 'stopLan' });
       await expect(fetch(`${base}/demo.origami.html`)).rejects.toThrow();
       expect(session.url).not.toBeNull(); // the loopback session is untouched
+      await rm(lanDir, { recursive: true, force: true });
     }
   );
+});
+
+describe('Origami Live host — serving the deck’s real folder', () => {
+  let session: ReturnType<typeof createLiveSession>;
+  let dir: string;
+  afterEach(async () => {
+    await session?.stop();
+    if (dir) await rm(dir, { recursive: true, force: true });
+  });
+
+  /** A real deck folder: the deck on disk plus a media sibling and a non-media sibling. */
+  async function realFolder(): Promise<string> {
+    dir = await mkdtemp(path.join(tmpdir(), 'origami-hostdir-'));
+    await writeFile(path.join(dir, 'demo.origami.html'), 'DISK BYTES — must never be served', 'utf8');
+    await writeFile(path.join(dir, 'clip.mp4'), Buffer.from('0123456789'));
+    await writeFile(path.join(dir, 'notes.txt'), 'private notes', 'utf8');
+    return dir;
+  }
+
+  it('serves the in-memory deck and streams a media sibling over Range', async () => {
+    session = createLiveSession();
+    const d = await realFolder();
+    const res = (await handleMessage(session, { cmd: 'serve', name: 'demo.origami.html', html: DECK, dir: d })) as {
+      url: string;
+    };
+
+    const page = await (await fetch(`${res.url}demo.origami.html`)).text();
+    expect(page).toContain('host hello'); // the handed-over bytes, not the disk file
+    expect(page).not.toContain('DISK BYTES');
+    expect(page).toContain("EventSource('/__live')");
+
+    const range = await fetch(`${res.url}clip.mp4`, { headers: { Range: 'bytes=2-5' } });
+    expect(range.status).toBe(206);
+    expect(range.headers.get('content-range')).toBe('bytes 2-5/10');
+    expect(Buffer.from(await range.arrayBuffer()).toString()).toBe('2345');
+  });
+
+  it('update keeps the new bytes in memory and never writes into the folder', async () => {
+    session = createLiveSession();
+    const d = await realFolder();
+    const before = await readdir(d);
+    const res = (await handleMessage(session, { cmd: 'serve', name: 'demo.origami.html', html: DECK, dir: d })) as {
+      url: string;
+    };
+    await handleMessage(session, { cmd: 'update', html: DECK.replace('host hello', 'host UPDATED') });
+
+    const page = await (await fetch(`${res.url}demo.origami.html`)).text();
+    expect(page).toContain('host UPDATED');
+    expect(await readdir(d)).toEqual(before); // no deck written, no file added or removed
+    expect(await readFile(path.join(d, 'demo.origami.html'), 'utf8')).toBe('DISK BYTES — must never be served');
+  });
+
+  it('stop leaves the real folder intact (it only removes a temp dir it made)', async () => {
+    session = createLiveSession();
+    const d = await realFolder();
+    await handleMessage(session, { cmd: 'serve', name: 'demo.origami.html', html: DECK, dir: d });
+    await session.stop();
+    expect((await readdir(d)).sort()).toEqual(['clip.mp4', 'demo.origami.html', 'notes.txt']);
+    expect((await readFile(path.join(d, 'clip.mp4'))).toString()).toBe('0123456789');
+  });
 });
 
 describe('Origami Live host — native-messaging framing', () => {

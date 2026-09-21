@@ -120,6 +120,64 @@ describe('origami-serve HTTP Range (local video scrubbing)', () => {
   });
 });
 
+describe('origami-serve — indexHtml mode (Go Live serves the deck’s real folder)', () => {
+  const DECKFILE = 'deck.origami.html';
+  const MEMORY = '<!doctype html><html><head><title>Memory Deck</title></head><body>from memory</body></html>';
+  let realDir: string;
+  let realServer: Server;
+  let realBase: string;
+
+  beforeAll(async () => {
+    realDir = await mkdtemp(path.join(tmpdir(), 'origami-realdir-'));
+    await writeFile(path.join(realDir, DECKFILE), 'DISK DECK — never served', 'utf8');
+    await writeFile(path.join(realDir, 'clip.mp4'), Buffer.from('0123456789'));
+    await writeFile(path.join(realDir, 'notes.txt'), 'private notes', 'utf8');
+    await writeFile(path.join(realDir, 'secrets.env'), 'TOKEN=hunter2', 'utf8');
+    realServer = createDeckServer({ root: realDir, indexFile: DECKFILE, indexHtml: MEMORY, live: true });
+    const port = await listenLoopback(realServer, 0);
+    realBase = `http://127.0.0.1:${port}`;
+  });
+  afterAll(async () => {
+    await new Promise<void>((r) => realServer.close(() => r()));
+    await rm(realDir, { recursive: true, force: true });
+  });
+
+  it('serves the in-memory index (with the live loader), never the on-disk deck', async () => {
+    const res = await fetch(`${realBase}/${DECKFILE}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    const body = await res.text();
+    expect(body).toContain('from memory');
+    expect(body).not.toContain('DISK DECK');
+    expect(body).toContain("EventSource('/__live')");
+  });
+
+  it('answers HEAD on the index with 200 and no body', async () => {
+    const res = await fetch(`${realBase}/${DECKFILE}`, { method: 'HEAD' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(await res.text()).toBe('');
+  });
+
+  it('Range-requests a media sibling → 206 with exactly the requested bytes', async () => {
+    const res = await fetch(`${realBase}/clip.mp4`, { headers: { Range: 'bytes=2-5' } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 2-5/10');
+    expect(Buffer.from(await res.arrayBuffer()).toString()).toBe('2345');
+  });
+
+  it('404s a non-media sibling even though it exists (the media allowlist)', async () => {
+    expect((await fetch(`${realBase}/notes.txt`)).status).toBe(404);
+    expect((await fetch(`${realBase}/secrets.env`)).status).toBe(404);
+  });
+
+  it('still refuses a path escaping the root', async () => {
+    const res = await fetch(`${realBase}/%2e%2e%2f%2e%2e%2fwindows%2fwin.ini`);
+    expect([403, 404]).toContain(res.status);
+    expect(res.status).not.toBe(200);
+  });
+});
+
 describe('origami-serve --live', () => {
   const DECKFILE = 'live.origami.html';
   let liveDir: string;

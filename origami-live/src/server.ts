@@ -25,6 +25,12 @@ const TYPES: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  // local video the deck references by relative path (the video block's local source)
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.webm': 'video/webm',
+  '.ogv': 'video/ogg',
+  '.mov': 'video/quicktime',
 };
 
 export interface ServeOptions {
@@ -50,6 +56,31 @@ function injectLive(html: string, prefix: string): string {
   const i = html.lastIndexOf('</body>');
   const loader = liveLoader(prefix);
   return i === -1 ? html + loader : html.slice(0, i) + loader + html.slice(i);
+}
+
+/** Parse a single-range `Range: bytes=…` header against a known file size.
+    - `bytes=a-b`, `bytes=a-`, `bytes=-n` → { start, end } (inclusive)
+    - malformed, or multi-range (a comma) → 'ignore' (serve the whole file, 200)
+    - a well-formed range wholly outside the file → 'unsatisfiable' (416)
+    Pure, so the arithmetic is testable without a socket. */
+function parseRange(header: string, size: number): { start: number; end: number } | 'ignore' | 'unsatisfiable' {
+  const m = /^bytes=(.+)$/.exec(header.trim());
+  if (!m) return 'ignore';
+  const spec = m[1].trim();
+  if (spec.includes(',')) return 'ignore'; // multi-range: serve it whole, never multipart
+  const parts = /^(\d*)-(\d*)$/.exec(spec);
+  if (!parts || (parts[1] === '' && parts[2] === '')) return 'ignore';
+  if (size === 0) return 'unsatisfiable';
+  if (parts[1] === '') {
+    const n = Number(parts[2]); // suffix: the last N bytes
+    if (!Number.isFinite(n) || n <= 0) return 'unsatisfiable';
+    return { start: Math.max(0, size - n), end: size - 1 };
+  }
+  const start = Number(parts[1]);
+  if (!Number.isFinite(start) || start >= size) return 'unsatisfiable';
+  const end = parts[2] === '' ? size - 1 : Math.min(Number(parts[2]), size - 1);
+  if (!Number.isFinite(end) || end < start) return 'unsatisfiable';
+  return { start, end };
 }
 
 /** Resolve a request path to a real file under root, or null if it escapes. */
@@ -141,7 +172,40 @@ export function createDeckServer(opts: ServeOptions): Server {
           return;
         }
 
-        res.writeHead(200, { 'content-type': type, 'content-length': info.size, 'cache-control': 'no-store' });
+        // Range support so a local video streams and scrubs instead of
+        // downloading whole. A malformed or multi-range header is ignored
+        // (whole-file 200); a range outside the file is 416.
+        const rangeHeader = req.headers.range;
+        if (rangeHeader !== undefined) {
+          const range = parseRange(rangeHeader, info.size);
+          if (range === 'unsatisfiable') {
+            res.writeHead(416, { 'content-range': `bytes */${info.size}`, 'accept-ranges': 'bytes' });
+            res.end();
+            return;
+          }
+          if (range !== 'ignore') {
+            res.writeHead(206, {
+              'content-type': type,
+              'content-length': range.end - range.start + 1,
+              'content-range': `bytes ${range.start}-${range.end}/${info.size}`,
+              'accept-ranges': 'bytes',
+              'cache-control': 'no-store',
+            });
+            if (req.method === 'HEAD') {
+              res.end();
+              return;
+            }
+            createReadStream(target, { start: range.start, end: range.end }).pipe(res);
+            return;
+          }
+        }
+
+        res.writeHead(200, {
+          'content-type': type,
+          'content-length': info.size,
+          'accept-ranges': 'bytes',
+          'cache-control': 'no-store',
+        });
         if (req.method === 'HEAD') {
           res.end();
           return;

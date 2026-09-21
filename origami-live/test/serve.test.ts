@@ -15,6 +15,7 @@ beforeAll(async () => {
   dir = await mkdtemp(path.join(tmpdir(), 'origami-serve-'));
   await writeFile(path.join(dir, 'a.origami.html'), DECK, 'utf8');
   await writeFile(path.join(dir, 'note.txt'), 'secret', 'utf8');
+  await writeFile(path.join(dir, 'clip.mp4'), Buffer.from('0123456789')); // 10 known bytes for Range
   server = createDeckServer({ root: dir, indexFile: 'a.origami.html' });
   const port = await listenLoopback(server, 0);
   base = `http://127.0.0.1:${port}`;
@@ -61,6 +62,61 @@ describe('origami-serve', () => {
     } finally {
       await new Promise<void>((r) => bare.close(() => r()));
     }
+  });
+});
+
+describe('origami-serve HTTP Range (local video scrubbing)', () => {
+  const bytes = async (res: Response): Promise<Buffer> => Buffer.from(await res.arrayBuffer());
+
+  it('advertises byte ranges and serves the whole file on a plain request', async () => {
+    const res = await fetch(`${base}/clip.mp4`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('accept-ranges')).toBe('bytes');
+    expect(res.headers.get('content-type')).toContain('video/mp4');
+    expect(res.headers.get('content-length')).toBe('10');
+    expect((await bytes(res)).toString()).toBe('0123456789');
+  });
+
+  it('bytes=0- → 206 with the full Content-Range and byte count', async () => {
+    const res = await fetch(`${base}/clip.mp4`, { headers: { Range: 'bytes=0-' } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 0-9/10');
+    expect(res.headers.get('content-length')).toBe('10');
+    expect(res.headers.get('accept-ranges')).toBe('bytes');
+    expect((await bytes(res)).toString()).toBe('0123456789');
+  });
+
+  it('a closed range returns exactly the requested slice', async () => {
+    const res = await fetch(`${base}/clip.mp4`, { headers: { Range: 'bytes=2-5' } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 2-5/10');
+    expect((await bytes(res)).toString()).toBe('2345');
+  });
+
+  it('a suffix range counts back from the end', async () => {
+    const res = await fetch(`${base}/clip.mp4`, { headers: { Range: 'bytes=-3' } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 7-9/10');
+    expect((await bytes(res)).toString()).toBe('789');
+  });
+
+  it('an unsatisfiable range → 416 with Content-Range: bytes */size', async () => {
+    const res = await fetch(`${base}/clip.mp4`, { headers: { Range: 'bytes=20-30' } });
+    expect(res.status).toBe(416);
+    expect(res.headers.get('content-range')).toBe('bytes */10');
+    expect((await bytes(res)).length).toBe(0);
+  });
+
+  it('a malformed range is ignored — the whole file comes back 200', async () => {
+    const res = await fetch(`${base}/clip.mp4`, { headers: { Range: 'bytes=abc' } });
+    expect(res.status).toBe(200);
+    expect((await bytes(res)).toString()).toBe('0123456789');
+  });
+
+  it('a multi-range header is ignored rather than multipart-answered', async () => {
+    const res = await fetch(`${base}/clip.mp4`, { headers: { Range: 'bytes=0-1,4-5' } });
+    expect(res.status).toBe(200);
+    expect((await bytes(res)).toString()).toBe('0123456789');
   });
 });
 

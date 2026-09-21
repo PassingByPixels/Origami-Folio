@@ -6,6 +6,9 @@ Paste this into the GitHub Release that ships `OrigamiLive.exe`. Fill every
 
 ---
 
+## v0.2.1 — what's new
+- **Seekable local video** — the helper now answers HTTP `Range` requests: `Accept-Ranges: bytes`, a `206 Partial Content` reply with `Content-Range` and the requested slice, and `416` when the range is unsatisfiable. A video that sits beside the deck streams and scrubs instead of downloading whole.
+
 ## Origami Live v{{VERSION}}
 
 A tiny, free helper that serves your Origami deck on **localhost**, so a single

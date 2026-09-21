@@ -30,7 +30,7 @@ import { WELCOME_HTML } from './welcome-html.js';
    would fail with the new extension, which is why the extension's REQUIRED_HELPER moves to
    0.2.0 with it. The arm flow itself is otherwise unchanged (temp working dir, live.json,
    loopback 8765). */
-export const HOST_VERSION = '0.2.0';
+export const HOST_VERSION = '0.2.1';
 
 /** How long open_deck waits for the user to approve in the browser before giving up (deny). */
 const CONFIRM_TIMEOUT_MS = 120_000;

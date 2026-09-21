@@ -16,7 +16,7 @@ no Node, no npm, no terminal.
 - **Video & dashboards play inline** — YouTube, Vimeo, Power BI and other embeds, instead of a fallback link card.
 - **Smooth, seekable video** — big local videos stream and scrub cleanly (no `file://` stutter).
 - **Live data** — slides can fetch live numbers: a chart, a KPI, a status board that's current at present-time.
-- **Watch it build** — connect an AI coding tool via `origami-mcp` and watch slides appear in real time.
+- **Watch it build** — connect an AI coding tool via `origami-mcp` and watch slides appear in real time. The local endpoint is tokenless: paste the URL alone, with no key to copy or keep current.
 - **Share to the room** — a read-only QR link so anyone on your Wi-Fi can view the deck on their own device (view-only, key-gated).
 
 ### Install

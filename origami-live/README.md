@@ -11,6 +11,14 @@ and dashboards play, big local videos stream smoothly, and (opt-in) a **view-onl
 QR share to devices on your own Wi-Fi. It uploads nothing, needs no account, and
 serves a temporary, read-only copy of the open deck.
 
+It also hosts the **local MCP endpoint** the Studio's AI connection uses (an AI
+coding tool builds the deck you have open). A browser extension cannot open a
+listening port, so this helper is what owns it. That endpoint is **tokenless**: it
+binds loopback and refuses any request that carries a browser `Origin` or a
+non-loopback `Host` (the drive-by and DNS-rebinding walls). It does **not** protect
+against another local process — anything already running on your machine can reach
+it. That is a deliberate, stated trade.
+
 ## Source-available (proprietary)
 
 This source is provided for **inspection and audit only**. OrigamiLive is
@@ -29,7 +37,9 @@ read the source — not from blind faith.
   (`randomBytes(16)`), so a port opened on your network reveals nothing without
   the key from the QR.
 - **`src/host.ts`** — the native-messaging host the browser extension talks to;
-  it's what receives a deck and starts/stops the server.
+  it's what receives a deck and starts/stops the server, and (when the AI
+  connection is armed) opens the loopback MCP port behind the Origin/Host guard
+  described above. The MCP server itself is `origami-mcp`.
 - **`src/cli.ts`** — the command-line entry point.
 - **`src/welcome-html.ts`** — the post-install welcome page (no network, no
   tracking).

@@ -51,8 +51,8 @@ Any `.origami.html` opens in any browser. To view, present or read one, just ope
 The full authoring surface: insert palette, themes, the AI fold-editor and export.
 → **Add to Chrome** *(listing in review — link landing shortly)*
 
-**3. OrigamiLive — to go live.** *(this repo's Releases)*
-A small local companion that adds **Go Live** (serve a deck over a local link) and **QR present** (drive the deck from your phone).
+**3. OrigamiLive — to go live, and to connect an AI.** *(this repo's Releases)*
+A small local companion that adds **Go Live** (serve a deck over a local link), **QR present** (drive the deck from your phone), and the **local AI connection** — it hosts the MCP endpoint an AI coding tool uses to build the deck you have open. That endpoint is **tokenless**: paste the URL alone, no key to copy or keep current.
 → [**Download the latest release**](https://github.com/PassingByPixels/Origami-Folio/releases/latest), run it, done.
 
 ## Quickstart
@@ -79,7 +79,7 @@ Origami is offline-first. No account, no telemetry, no analytics. An `.origami.h
 
 **Does it phone home?** No.
 
-**Do I need OrigamiLive to use a deck?** No — only for **Go Live** / **QR present**. Files open, and the add-on authors, without it.
+**Do I need OrigamiLive to use a deck?** No. Files open, and the add-on authors decks, without it. It is required for **Go Live** / **QR present**, and for the **AI connection** — the helper is what hosts the local MCP endpoint (because a browser extension cannot open a listening port itself). That endpoint is tokenless: no key to paste.
 
 ## Licence
 

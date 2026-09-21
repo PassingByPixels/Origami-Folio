@@ -25,7 +25,12 @@ import { serveHttp, type HttpServeHandle, type AuthorBridge } from 'origami-mcp'
 import { createDeckServer, listenLoopback, listenLan, lanAddress } from './server.js';
 import { WELCOME_HTML } from './welcome-html.js';
 
-export const HOST_VERSION = '0.1.5';
+/* 0.2.0 ships the tokenless MCP port (Origin/Host guard instead of a bearer token), so the
+   arm reply and live.json no longer carry a token. An older helper still REQUIRES a token and
+   would fail with the new extension, which is why the extension's REQUIRED_HELPER moves to
+   0.2.0 with it. The arm flow itself is otherwise unchanged (temp working dir, live.json,
+   loopback 8765). */
+export const HOST_VERSION = '0.2.0';
 
 /** How long open_deck waits for the user to approve in the browser before giving up (deny). */
 const CONFIRM_TIMEOUT_MS = 120_000;
@@ -102,13 +107,13 @@ export function createLiveSession() {
 
 /* ---------- the armed authoring session (the MCP "port") ----------
    When the browser addon ARMS, the host opens a loopback MCP /mcp port over a
-   working dir it owns (serveHttp from @origami/mcp), writes the url+token to
+   working dir it owns (serveHttp from @origami/mcp), writes the url to
    ~/.origami/live.json for the agent to read, and watches the dir. Whenever the
    agent's create_deck / save_deck writes a deck there, the host pushes the bytes
    to the armed extension over the native port (relay-update) — the Studio adopts
    them live. The agent never touches the browser; arming is the consent. */
 
-/** The discovery file the external agent reads for the loopback URL + token. */
+/** The discovery file the external agent reads for the loopback URL. */
 function liveConfigPath(): string {
   return path.join(homedir(), '.origami', 'live.json');
 }
@@ -129,7 +134,7 @@ export function createAuthorSession(
 ) {
   const configPath = opts.configPath ?? liveConfigPath();
   // fixed loopback port so a static MCP client config (a URL in a config file) keeps
-  // working across arms; the token rotates each arm and rides into live.json.
+  // working across arms — the URL is the whole connection now (tokenless).
   const port = opts.port ?? 8765;
   let state: ArmState | null = null;
   let debounce: NodeJS.Timeout | undefined;
@@ -209,18 +214,18 @@ export function createAuthorSession(
     get armed(): boolean {
       return state !== null;
     },
-    info(): { url: string; token: string; dir: string } | null {
-      return state ? { url: state.http.url, token: state.http.token, dir: state.dir } : null;
+    info(): { url: string; dir: string } | null {
+      return state ? { url: state.http.url, dir: state.dir } : null;
     },
-    async arm(): Promise<{ url: string; token: string; dir: string }> {
-      if (state) return { url: state.http.url, token: state.http.token, dir: state.dir };
+    async arm(): Promise<{ url: string; dir: string }> {
+      if (state) return { url: state.http.url, dir: state.dir };
       const dir = await mkdtemp(path.join(tmpdir(), 'origami-author-'));
       const http = await serveHttp([dir], { port }, bridge);
       state = { dir, http };
       await mkdir(path.dirname(configPath), { recursive: true });
       await writeFile(
         configPath,
-        JSON.stringify({ url: http.url, token: http.token, workingDir: dir, pid: process.pid }, null, 2),
+        JSON.stringify({ url: http.url, workingDir: dir, pid: process.pid }, null, 2),
         'utf8'
       );
       try {
@@ -233,7 +238,7 @@ export function createAuthorSession(
       } catch {
         /* fs.watch unsupported here — the agent still authors; just no live push */
       }
-      return { url: http.url, token: http.token, dir };
+      return { url: http.url, dir };
     },
     /** Route the browser's answer to an open_deck consent prompt back to the waiting tool. */
     resolveConfirm(requestId: string, approved: boolean): void {

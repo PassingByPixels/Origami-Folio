@@ -6,6 +6,10 @@ Paste this into the GitHub Release that ships `OrigamiLive.exe`. Fill every
 
 ---
 
+## v0.2.3 — what's new
+- **Standard MCP clients can connect** — the MCP port accepts the 2025-11-25 handshake as well as 2026-07-28. Spec-compliant clients (Claude Code, the TypeScript SDK) no longer get a 400 on `initialize` when they omit the protocol version header on the opening request.
+- Carries the current monorepo MCP + runtime bake (dual-protocol transport fix from Folio 0.5).
+
 ## v0.2.2 — what's new
 - **Local video over Go Live** — when the deck is saved, Go Live now serves the deck's own folder, so a video beside the deck (a relative path like `media/intro.mp4`) streams and scrubs over http instead of 404ing. The deck's bytes still come from the editor (unsaved edits keep working) and your folder is never written to.
 - **Media-only siblings** — serving the folder is restricted to media and asset extensions (`mp4 m4v webm ogv mov png jpg jpeg gif webp avif svg`); every other path answers 404, so the helper cannot be used to read the other files in the folder.

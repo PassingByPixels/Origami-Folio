@@ -30,8 +30,10 @@ import { WELCOME_HTML } from './welcome-html.js';
    would fail with the new extension, which is why the extension's REQUIRED_HELPER moves to
    0.2.0 with it. The arm flow itself is otherwise unchanged (temp working dir, live.json,
    loopback 8765). 0.2.2 adds Go Live serving the deck's REAL folder (a local video beside
-   the deck then resolves over http), so the extension's REQUIRED_HELPER moves to 0.2.2. */
-export const HOST_VERSION = '0.2.2';
+   the deck then resolves over http), so the extension's REQUIRED_HELPER moves to 0.2.2.
+   0.2.3 accepts the 2025-11-25 MCP handshake so standard SDK clients and Claude Code can
+   connect; REQUIRED_HELPER moves to 0.2.3 with it. */
+export const HOST_VERSION = '0.2.3';
 
 /** How long open_deck waits for the user to approve in the browser before giving up (deny). */
 const CONFIRM_TIMEOUT_MS = 120_000;
@@ -215,7 +217,7 @@ export function createAuthorSession(
       // concurrent open_deck would clobber the first. Reject it clearly instead of hanging.
       if (pendingConfirms.size > 0) {
         return Promise.reject(
-          new Error('another deck is awaiting your approval in the browser — answer that prompt first, then retry')
+          new Error('another file is awaiting your approval in the browser — answer that prompt first, then retry')
         );
       }
       return new Promise<boolean>((resolve) => {

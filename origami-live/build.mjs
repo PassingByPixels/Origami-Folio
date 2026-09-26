@@ -1,5 +1,37 @@
 import { build } from 'esbuild';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { readRuntimeArtifact, runtimeArtifactPath } from '../../tools/runtime-artifact.mjs';
+import { bakeCarries, sha256 } from '../../tools/check-bake.mjs';
+
+// This package never reads the runtime: host.ts imports origami-mcp, so esbuild pulls the runtime
+// out of the MCP's already-built dist/index.cjs. That is the one bake point with no artifact read
+// of its own, and without a guard it will cheerfully bundle a STALE runtime — the drift then only
+// shows up at the end of the monorepo build, which nobody runs when they are working on this one
+// package. So the input is checked here, before it is bundled, using the same comparison
+// tools/check-bake.mjs uses for the outputs.
+const MCP_BUNDLE = { file: 'packages/mcp/dist/index.cjs', how: 'inline' };
+const MCP_BUNDLE_PATH = fileURLToPath(new URL('../mcp/dist/index.cjs', import.meta.url));
+try {
+  const runtime = readRuntimeArtifact();
+  let mcpBundle;
+  try {
+    mcpBundle = readFileSync(MCP_BUNDLE_PATH, 'utf8');
+  } catch {
+    throw new Error(
+      'packages/mcp/dist/index.cjs is missing — the runtime reaches this bundle only through the MCP build, so build that first (npm run build -w origami-mcp)'
+    );
+  }
+  bakeCarries(MCP_BUNDLE, mcpBundle, runtime, {
+    expectedSha: sha256(runtime),
+    artifactMtime: statSync(runtimeArtifactPath()).mtimeMs,
+    path: MCP_BUNDLE_PATH,
+  });
+} catch (error) {
+  // A build gate should say what is wrong, not where in the module graph it found out.
+  console.error(`FAIL: ${error.message}`);
+  process.exit(1);
+}
 
 // Inline the branded welcome page (host/welcome.html) as a string constant so the
 // packaged single-file exe can write + open it on self-install (no sidecar file to
@@ -19,7 +51,14 @@ const common = {
   format: 'cjs',
   target: 'node20',
   banner: { js: '#!/usr/bin/env node' },
+  // The runtime reaches this bundle INHERITED: host.ts imports origami-mcp, so esbuild reads
+  // dist/index.cjs and re-prints the runtime string literal it finds there. It therefore has to
+  // print it the same way the MCP build did — charset utf8, or every non-ASCII character becomes a
+  // \uXXXX escape and tools/check-bake.mjs can no longer match the bundle against the artifact.
+  // Same setting, same reason, one sentence apart.
+  charset: 'utf8',
   logLevel: 'warning',
+  external: ['playwright'],
 };
 await build({ ...common, entryPoints: ['src/cli.ts'], outfile: 'dist/cli.cjs' });
 await build({ ...common, entryPoints: ['src/host.ts'], outfile: 'dist/host.cjs' });

@@ -1,6 +1,6 @@
 {
   "name": "origami-serve",
-  "version": "0.2.3",
+  "version": "0.2.8",
   "private": true,
   "type": "module",
   "description": "Serve .origami.html decks over localhost so referrer-gated embeds (YouTube, Power BI) play",
@@ -10,6 +10,7 @@
   "scripts": {
     "build": "node build.mjs",
     "build:exe": "node build-exe.mjs",
+    "test:exe": "node test/exe-sharp.e2e.mjs",
     "test": "node build.mjs && vitest run"
   },
   "dependencies": {

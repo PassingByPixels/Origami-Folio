@@ -58,7 +58,9 @@ const common = {
   // Same setting, same reason, one sentence apart.
   charset: 'utf8',
   logLevel: 'warning',
-  external: ['playwright'],
+  // sharp is native (MCP add_asset bounds); esbuild must not try to bundle .node files
+  // when host.ts pulls origami-mcp. Same externals list as packages/mcp/build.mjs.
+  external: ['playwright', 'sharp'],
 };
 await build({ ...common, entryPoints: ['src/cli.ts'], outfile: 'dist/cli.cjs' });
 await build({ ...common, entryPoints: ['src/host.ts'], outfile: 'dist/host.cjs' });

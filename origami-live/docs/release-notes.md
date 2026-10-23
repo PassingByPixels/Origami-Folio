@@ -6,6 +6,25 @@ Paste this into the GitHub Release that ships `OrigamiLive.exe`. Fill every
 
 ---
 
+## v0.2.8 — what's new
+- **One Allow per file** — `open_deck` consent remembers one approval per file for the armed session, so the banner does not repeat on later calls. A deny stays retryable, and disarm revokes every approval.
+- **Board MCP surface** — carries the 0.5.23 Board tools: `autoParent`, `instanceRootId`, `board_group`, `board_ungroup`, `board_icon_import`, and the `events/*` methods (subscriptions, callback verification and signed webhook delivery).
+
+## v0.2.7 — what's new
+- Rebuilt from the 0.5.23 source: 104 tools (69 `board_*`), including `board_group`, `board_ungroup` and `board_icon_import`; `board_add_nodes` accepts `autoParent`; `board_instance_insert` returns `instanceRootId`; `server/discover` advertises events and `events/list` returns 3 definitions.
+
+## v0.2.6 — what's new
+- **Board tools on the local MCP port** — `board_fold_create`, `board_add_nodes`, `board_render` and the rest of the board family now sit beside the deck tools at `http://127.0.0.1:8765/mcp`.
+
+## v0.2.5 — what's new
+- **Images through the AI connection** — an agent can add an image to the open deck.
+- **Automatic reconnect** — the AI connection recovers after a drop.
+- The extension requires 0.2.5 or newer.
+
+## v0.2.4 — what's new
+- **The packaged exe starts** — sharp is loaded lazily, so the SEA build starts and image tools work.
+- **Task scopes enforced** — the helper checks the scope of each AI task.
+
 ## v0.2.3 — what's new
 - **Standard MCP clients can connect** — the MCP port accepts the 2025-11-25 handshake as well as 2026-07-28. Spec-compliant clients (Claude Code, the TypeScript SDK) no longer get a 400 on `initialize` when they omit the protocol version header on the opening request.
 - Carries the current monorepo MCP + runtime bake (dual-protocol transport fix from Folio 0.5).

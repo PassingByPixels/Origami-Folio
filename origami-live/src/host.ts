@@ -14,16 +14,17 @@
      -> { cmd: 'update', html }         <- { ok }        (rebuild the live page)
      -> { cmd: 'stop' }                 <- { ok }
 */
-import { mkdtemp, writeFile, rm, mkdir, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, mkdir, readFile, stat, realpath } from 'node:fs/promises';
 import { writeFileSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir, homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import type { Server } from 'node:http';
-import { serveHttp, type HttpServeHandle, type AuthorBridge } from 'origami-mcp';
+import { serveHttp, parseScope, describeScope, setSharpLoader, type HttpServeHandle, type AuthorBridge, type WriteScope, type ConsentGrants } from 'origami-mcp';
 import { createDeckServer, listenLoopback, listenLan, lanAddress, type DeckServer } from './server.js';
 import { WELCOME_HTML } from './welcome-html.js';
+import { seaSharpLoader } from './sea-sharp.js';
 
 /* 0.2.0 ships the tokenless MCP port (Origin/Host guard instead of a bearer token), so the
    arm reply and live.json no longer carry a token. An older helper still REQUIRES a token and
@@ -32,10 +33,16 @@ import { WELCOME_HTML } from './welcome-html.js';
    loopback 8765). 0.2.2 adds Go Live serving the deck's REAL folder (a local video beside
    the deck then resolves over http), so the extension's REQUIRED_HELPER moves to 0.2.2.
    0.2.3 accepts the 2025-11-25 MCP handshake so standard SDK clients and Claude Code can
-   connect; REQUIRED_HELPER moves to 0.2.3 with it. */
-export const HOST_VERSION = '0.2.3';
+   connect; REQUIRED_HELPER moves to 0.2.3 with it. 0.2.6 packages the helper from the current
+   MCP source, so the port serves the Board tools (board_fold_create, board_add_nodes,
+   board_render and the rest of the family), not only the deck tools. 0.2.7 rebuilds from the
+   0.5.23 source: the Board tools carry autoParent, instanceRootId, board_group, board_ungroup
+   and board_icon_import, and the port serves the events/* methods. 0.2.8 adds the open_deck
+   consent fix: one Allow covers later calls on the same file for the armed session. */
+export const HOST_VERSION = '0.2.8';
 
-/** How long open_deck waits for the user to approve in the browser before giving up (deny). */
+/** How long open_deck waits for the user to ANSWER a consent prompt before giving up (deny).
+    This is not a grant expiry: an approved file stays granted until disarm. */
 const CONFIRM_TIMEOUT_MS = 120_000;
 
 interface LiveState {
@@ -169,6 +176,9 @@ function liveConfigPath(): string {
   return path.join(homedir(), '.origami', 'live.json');
 }
 
+/** The file types an image-folder grant covers (add_asset's own list). */
+const IMAGE_FILE_RE = /\.(png|jpe?g|webp|gif|avif|svg)$/i;
+
 interface ArmState {
   http: HttpServeHandle;
   dir: string;
@@ -191,10 +201,24 @@ export function createAuthorSession(
   let debounce: NodeJS.Timeout | undefined;
   // open_deck consent round-trips: requestId → the resolver waiting on the browser's answer.
   const pendingConfirms = new Map<string, (approved: boolean) => void>();
+  // open_deck approvals: exact files the user allowed, for this armed session only (cleared on
+  // disarm). Shared with the MCP port so a later request can edit an approved file without a
+  // second prompt; the port's own store reads the same set.
+  const consentGrants: ConsentGrants = new Set<string>();
   // per-approved-file watchers, so a save_deck to a real file re-pushes it to the relay tab.
   const openWatchers = new Map<string, FSWatcher>();
   // per-file debounce timers (a single shared timer would let one file's save cancel another's push).
   const openDebounce = new Map<string, NodeJS.Timeout>();
+
+  // add_asset image-read consent: folders the user approved for IMAGE reads, for this armed
+  // session only (cleared on disarm = revoked). Exact folder, no subfolders, image types only.
+  // Not a deck sandbox grant — the MCP store never sees it.
+  const imageFolders = new Set<string>();
+  const pendingImageFolders = new Map<string, Promise<boolean>>(); // coalesce parallel asks
+  const folderKey = (dir: string): string => (process.platform === 'win32' ? dir.toLowerCase() : dir);
+  // The author's task scope (t-u6cons), set from the Studio's AI panel. Every MCP write reads it
+  // (DeckStore.edit + the whole-file tools). Ends with the armed session, like the grants.
+  let scope: WriteScope | null = null;
 
   /** Read a deck file and push its bytes to the relay tab (host → extension over the native port). */
   async function pushFile(absFile: string): Promise<void> {
@@ -213,6 +237,11 @@ export function createAuthorSession(
       requestOpen is the consent gate; onOpened starts the watch-and-push once approved. */
   const bridge: AuthorBridge = {
     requestOpen(absPath: string): Promise<boolean> {
+      // one Allow covers this exact file for the armed session: a repeat open_deck on a file
+      // the user already approved must not raise a second banner. The grant is cleared on
+      // disarm, so turning the AI connection off revokes it.
+      const abs = path.normalize(absPath);
+      if (consentGrants.has(abs)) return Promise.resolve(true);
       // one consent prompt at a time — the relay tab shows a single banner, so a second
       // concurrent open_deck would clobber the first. Reject it clearly instead of hanging.
       if (pendingConfirms.size > 0) {
@@ -228,12 +257,51 @@ export function createAuthorSession(
           settled = true;
           clearTimeout(timer);
           pendingConfirms.delete(requestId);
+          if (approved && state) consentGrants.add(abs); // disarmed meanwhile -> no grant
           resolve(approved);
         };
         const timer = setTimeout(() => finish(false), CONFIRM_TIMEOUT_MS); // no answer → deny (safe-fail)
         pendingConfirms.set(requestId, finish);
         push({ type: 'relay-confirm', kind: 'open', path: absPath, requestId });
       });
+    },
+    async requestImageRead(absFile: string): Promise<boolean> {
+      if (!IMAGE_FILE_RE.test(absFile)) return false; // the grant covers images only
+      // Resolve links BEFORE the folder test: a symlink/junction inside an approved folder that
+      // points elsewhere must be judged by where it really lives. A file that does not exist
+      // yet cannot be a link, so the lexical path stands (and the read will fail on its own).
+      let real = path.resolve(absFile);
+      try {
+        real = await realpath(real);
+      } catch {
+        /* missing file: keep the resolved lexical path */
+      }
+      const dir = path.dirname(real);
+      const key = folderKey(dir);
+      if (imageFolders.has(key)) return true;
+      const waiting = pendingImageFolders.get(key); // parallel add_asset calls share ONE prompt
+      if (waiting) return waiting;
+      const ask = new Promise<boolean>((resolve) => {
+        if (pendingConfirms.size > 0) {
+          resolve(false); // a different prompt is on screen; deny rather than stack banners
+          return;
+        }
+        const requestId = randomBytes(8).toString('hex');
+        let settled = false;
+        const finish = (approved: boolean): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          pendingConfirms.delete(requestId);
+          if (approved && state) imageFolders.add(key); // disarmed meanwhile -> no grant
+          resolve(approved);
+        };
+        const timer = setTimeout(() => finish(false), CONFIRM_TIMEOUT_MS);
+        pendingConfirms.set(requestId, finish);
+        push({ type: 'relay-confirm', kind: 'read-images', path: dir, requestId });
+      }).finally(() => pendingImageFolders.delete(key));
+      pendingImageFolders.set(key, ask);
+      return ask;
     },
     onOpened(absPath: string): void {
       // show it in the relay tab right away, then watch its dir (filtered to this file's name)
@@ -271,7 +339,7 @@ export function createAuthorSession(
     async arm(): Promise<{ url: string; dir: string }> {
       if (state) return { url: state.http.url, dir: state.dir };
       const dir = await mkdtemp(path.join(tmpdir(), 'origami-author-'));
-      const http = await serveHttp([dir], { port }, bridge);
+      const http = await serveHttp([dir], { port, scope: () => scope, grants: consentGrants }, bridge);
       state = { dir, http };
       await mkdir(path.dirname(configPath), { recursive: true });
       await writeFile(
@@ -291,6 +359,25 @@ export function createAuthorSession(
       }
       return { url: http.url, dir };
     },
+    /** Set (or clear, with null) the task scope. A malformed scope is refused, never widened:
+        the previous scope stays in force and the caller gets an error. */
+    setScope(raw: unknown): { ok: true; scope: string | null } | { ok: false; error: string } {
+      if (raw === null || raw === undefined) {
+        scope = null;
+        return { ok: true, scope: null };
+      }
+      const parsed = parseScope(raw);
+      if (!parsed) return { ok: false, error: 'invalid task scope — not applied' };
+      scope = parsed;
+      return { ok: true, scope: describeScope(parsed) };
+    },
+    get scope(): WriteScope | null {
+      return scope;
+    },
+    /** Revoke every remembered image-folder approval now (the armed session stays up). */
+    revokeImageReads(): void {
+      imageFolders.clear();
+    },
     /** Route the browser's answer to an open_deck consent prompt back to the waiting tool. */
     resolveConfirm(requestId: string, approved: boolean): void {
       pendingConfirms.get(requestId)?.(approved);
@@ -305,6 +392,9 @@ export function createAuthorSession(
       for (const w of openWatchers.values()) w.close();
       openWatchers.clear();
       for (const finish of pendingConfirms.values()) finish(false); // any pending open → deny
+      consentGrants.clear(); // open_deck approvals end with the armed session
+      imageFolders.clear(); // image-read approvals end with the armed session
+      scope = null; // so does the task scope
       pendingConfirms.clear();
       s.watcher?.close();
       await s.http.close();
@@ -313,7 +403,7 @@ export function createAuthorSession(
   };
 }
 
-type Msg = { cmd?: string; name?: string; html?: string; dir?: string; requestId?: string; approved?: boolean };
+type Msg = { cmd?: string; name?: string; html?: string; dir?: string; requestId?: string; approved?: boolean; scope?: unknown };
 
 export async function handleMessage(
   session: ReturnType<typeof createLiveSession>,
@@ -354,7 +444,12 @@ function writeMessage(msg: unknown): void {
 
 function runHost(): void {
   const session = createLiveSession();
-  const author = createAuthorSession(writeMessage);
+  // The exe cannot import sharp from its bundle; it unpacks its embedded copy on first use.
+  const sharpLoader = seaSharpLoader();
+  if (sharpLoader) setSharpLoader(sharpLoader);
+  // ORIGAMI_LIVE_PORT moves the MCP port off 8765 (tests run a built exe beside an installed one).
+  const envPort = process.env.ORIGAMI_LIVE_PORT;
+  const author = createAuthorSession(writeMessage, envPort ? { port: Number(envPort) } : {});
   let acc = Buffer.alloc(0);
   let draining = false;
 
@@ -369,6 +464,9 @@ function runHost(): void {
         return { ok: true };
       case 'arm-status':
         return { ok: true, armed: author.armed, ...(author.info() ?? {}) };
+      case 'set-scope':
+        // tagged so the extension never mistakes this reply for an arm reply (or an arm error)
+        return { type: 'scope-ack', ...author.setScope(msg.scope) };
       case 'relay-confirm-reply':
         author.resolveConfirm(String(msg.requestId ?? ''), msg.approved === true);
         return { ok: true };
